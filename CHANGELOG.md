@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.1 - 2026-01-22
+
+### Added
+
+- **Path-based auto-register** - New `autoRegisterPaths` config option allows specifying folders where agents should auto-join the mesh, instead of global auto-register. Supports `~` expansion and glob patterns (`~/work/*`).
+- **Folder scoping** - New `scopeToFolder` config option limits agent visibility to the same working directory. When enabled, agents only see other agents in the same folder (broadcasts are scoped, but direct messaging by name still works).
+- **Auto-register path management (tool)** - New `autoRegisterPath` parameter:
+  - `pi_messenger({ autoRegisterPath: "add" })` - Add current folder to auto-register list
+  - `pi_messenger({ autoRegisterPath: "remove" })` - Remove current folder
+  - `pi_messenger({ autoRegisterPath: "list" })` - Show all configured paths
+- **Config TUI command** - `/messenger config` opens an overlay to manage auto-register paths with keyboard navigation.
+
+### Changed
+
+- Auto-register logic now checks both `autoRegister` (global) and `autoRegisterPaths` (path-based). If either matches, the agent auto-joins.
+- `getActiveAgents()` now filters by cwd when `scopeToFolder` is enabled.
+
 ## 0.5.0 - 2026-01-20
 
 ### Added

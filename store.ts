@@ -158,6 +158,11 @@ export function getRegistrationPath(state: MessengerState, dirs: Dirs): string {
 export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistration[] {
   const now = Date.now();
   const excludeName = state.agentName;
+  const myCwd = process.cwd();
+  const scopeToFolder = state.scopeToFolder;
+
+  // Cache key includes scopeToFolder and cwd for proper cache invalidation
+  const cacheKey = scopeToFolder ? `${excludeName}:${myCwd}` : excludeName;
 
   // Return cached if valid (Fix 1)
   if (
@@ -165,13 +170,16 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
     agentsCache.registryPath === dirs.registry &&
     now - agentsCache.timestamp < AGENTS_CACHE_TTL_MS
   ) {
-    // Check if we have a cached filtered result for this agent name
-    const cachedFiltered = agentsCache.filtered.get(excludeName);
+    // Check if we have a cached filtered result for this cache key
+    const cachedFiltered = agentsCache.filtered.get(cacheKey);
     if (cachedFiltered) return cachedFiltered;
 
     // Create and cache filtered result
-    const filtered = agentsCache.allAgents.filter(a => a.name !== excludeName);
-    agentsCache.filtered.set(excludeName, filtered);
+    let filtered = agentsCache.allAgents.filter(a => a.name !== excludeName);
+    if (scopeToFolder) {
+      filtered = filtered.filter(a => a.cwd === myCwd);
+    }
+    agentsCache.filtered.set(cacheKey, filtered);
     return filtered;
   }
 
@@ -213,9 +221,12 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
   }
 
   // Cache the full list and create filtered result
-  const filtered = allAgents.filter(a => a.name !== excludeName);
+  let filtered = allAgents.filter(a => a.name !== excludeName);
+  if (scopeToFolder) {
+    filtered = filtered.filter(a => a.cwd === myCwd);
+  }
   const filteredMap = new Map<string, AgentRegistration[]>();
-  filteredMap.set(excludeName, filtered);
+  filteredMap.set(cacheKey, filtered);
 
   agentsCache = { allAgents, filtered: filteredMap, timestamp: now, registryPath: dirs.registry };
 

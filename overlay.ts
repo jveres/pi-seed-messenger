@@ -217,7 +217,7 @@ export class MessengerOverlay implements Component, Focusable {
 
   render(width: number): string[] {
     this.cachedAgents = null;  // Clear cache at start of render cycle
-    const innerWidth = width - 4;
+    const innerWidth = Math.max(0, width - 4);
     const totalHeight = Math.floor(this.tui.terminal.rows * 0.45);
     const agents = this.getAgentsSorted();
 
@@ -507,8 +507,8 @@ export class MessengerOverlay implements Component, Focusable {
     const time = this.theme.fg("dim", timeStr);
     const safeText = stripAnsiCodes(msg.text);
 
-    const boxWidth = Math.min(maxWidth, 60);
-    const contentWidth = boxWidth - 4;
+    const boxWidth = Math.max(6, Math.min(maxWidth, 60));
+    const contentWidth = Math.max(1, boxWidth - 4);
 
     const wrappedLines = this.wrapText(safeText, contentWidth);
 
@@ -526,7 +526,7 @@ export class MessengerOverlay implements Component, Focusable {
       lines.push(`│ ${line}${" ".repeat(Math.max(0, padRight))} │`);
     }
 
-    lines.push(`└${"─".repeat(boxWidth - 2)}┘`);
+    lines.push(`└${"─".repeat(Math.max(0, boxWidth - 2))}┘`);
     lines.push("");
 
     return lines;
@@ -581,12 +581,12 @@ export class MessengerOverlay implements Component, Focusable {
     const hintLen = visibleWidth("[Tab] [Enter]");
 
     if (this.inputText) {
-      const maxInputLen = width - 2 - hintLen - 2;
+      const maxInputLen = Math.max(1, width - 2 - hintLen - 2);
       const displayText = truncateToWidth(this.inputText, maxInputLen);
       const padLen = width - 2 - visibleWidth(displayText) - hintLen;
       return prompt + displayText + " ".repeat(Math.max(0, padLen)) + hint;
     } else {
-      const displayPlaceholder = truncateToWidth(placeholder, width - 2 - hintLen - 2);
+      const displayPlaceholder = truncateToWidth(placeholder, Math.max(1, width - 2 - hintLen - 2));
       const padLen = width - 2 - visibleWidth(displayPlaceholder) - hintLen;
       return prompt + this.theme.fg("dim", displayPlaceholder) + " ".repeat(Math.max(0, padLen)) + hint;
     }

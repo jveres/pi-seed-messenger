@@ -24,7 +24,8 @@ import {
 import * as store from "./store.js";
 import * as handlers from "./handlers.js";
 import { MessengerOverlay } from "./overlay.js";
-import { loadConfig, type MessengerConfig } from "./config.js";
+import { MessengerConfigOverlay } from "./config-overlay.js";
+import { loadConfig, matchesAutoRegisterPath, type MessengerConfig } from "./config.js";
 
 let overlayTui: TUI | null = null;
 
@@ -48,7 +49,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     broadcastHistory: [],
     seenSenders: new Map(),
     gitBranch: undefined,
-    spec: undefined
+    spec: undefined,
+    scopeToFolder: config.scopeToFolder
   };
 
   const baseDir = process.env.PI_MESSENGER_DIR || join(homedir(), ".pi/agent/messenger");
@@ -176,8 +178,11 @@ Usage:
   pi_messenger({ release: ["src/auth/"] })       → Release specific reservations
   pi_messenger({ release: true })                → Release all your reservations
   pi_messenger({ rename: "NewName" })            → Rename yourself
+  pi_messenger({ autoRegisterPath: "add" })      → Add current folder to auto-register list
+  pi_messenger({ autoRegisterPath: "remove" })   → Remove current folder from auto-register list
+  pi_messenger({ autoRegisterPath: "list" })     → Show all auto-register paths
 
-Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > reserve > release > rename > list > status`,
+Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > reserve > release > rename > autoRegisterPath > list > status`,
     parameters: Type.Object({
       join: Type.Optional(Type.Boolean({ description: "Join the agent mesh" })),
       spec: Type.Optional(Type.String({ description: "Path to spec/plan file" })),
@@ -187,19 +192,24 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
       notes: Type.Optional(Type.String({ description: "Completion notes" })),
       swarm: Type.Optional(Type.Boolean({ description: "Get swarm status" })),
       to: Type.Optional(Type.Union([
-        Type.String({ description: "Target agent name" }),
-        Type.Array(Type.String(), { description: "Multiple target agent names" })
-      ])),
+        Type.String(),
+        Type.Array(Type.String())
+      ], { description: "Target agent name (string) or multiple names (array)" })),
       broadcast: Type.Optional(Type.Boolean({ description: "Send to all active agents" })),
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
       reserve: Type.Optional(Type.Array(Type.String(), { description: "Paths to reserve" })),
       reason: Type.Optional(Type.String({ description: "Reason for reservation" })),
       release: Type.Optional(Type.Union([
-        Type.Array(Type.String(), { description: "Patterns to release" }),
-        Type.Boolean({ description: "true to release all" })
-      ])),
+        Type.Array(Type.String()),
+        Type.Boolean()
+      ], { description: "Patterns to release (array) or true to release all (boolean)" })),
       rename: Type.Optional(Type.String({ description: "Rename yourself to a new name" })),
+      autoRegisterPath: Type.Optional(Type.Union([
+        Type.Literal("add"),
+        Type.Literal("remove"),
+        Type.Literal("list")
+      ], { description: "Manage auto-register paths: add/remove current folder, or list all" })),
       list: Type.Optional(Type.Boolean({ description: "List other agents" }))
     }),
 
@@ -219,6 +229,7 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
       reason?: string;
       release?: string[] | boolean;
       rename?: string;
+      autoRegisterPath?: "add" | "remove" | "list";
       list?: boolean;
     }, _onUpdate, ctx, _signal) {
       const {
@@ -237,6 +248,7 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
         reason,
         release,
         rename,
+        autoRegisterPath,
         list
       } = params;
 
@@ -259,6 +271,11 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
         }
         
         return joinResult;
+      }
+
+      // autoRegisterPath doesn't require registration - it's config management
+      if (autoRegisterPath) {
+        return handlers.executeAutoRegisterPath(autoRegisterPath);
       }
 
       // All other operations require registration
@@ -285,11 +302,30 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
   // ===========================================================================
 
   pi.registerCommand("messenger", {
-    description: "Open messenger overlay (auto-joins if not registered)",
-    handler: async (_args, ctx) => {
+    description: "Open messenger overlay, or 'config' to manage settings",
+    handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
 
-      // Auto-join when user opens overlay
+      // /messenger config - open config overlay
+      if (args[0] === "config") {
+        await ctx.ui.custom<void>(
+          (tui, theme, _keybindings, done) => {
+            return new MessengerConfigOverlay(tui, theme, done);
+          },
+          {
+            overlay: true,
+            overlayOptions: {
+              width: "60%",
+              maxHeight: "50%",
+              anchor: "center",
+              margin: 1,
+            },
+          }
+        );
+        return;
+      }
+
+      // /messenger - open chat overlay (auto-joins if not registered)
       if (!state.registered) {
         if (!store.register(state, dirs, ctx)) {
           ctx.ui.notify("Failed to join agent mesh", "error");
@@ -356,8 +392,11 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
   // ===========================================================================
 
   pi.on("session_start", async (_event, ctx) => {
-    // Only auto-register if configured (default: false)
-    if (!config.autoRegister) return;
+    // Check if auto-register is enabled (global or path-based)
+    const shouldAutoRegister = config.autoRegister || 
+      matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
+    
+    if (!shouldAutoRegister) return;
 
     if (store.register(state, dirs, ctx)) {
       store.startWatcher(state, dirs, deliverMessage);

@@ -58,6 +58,7 @@ export interface MessengerState {
   seenSenders: Map<string, string>;  // name -> sessionId (detects agent restarts)
   gitBranch?: string;
   spec?: string;
+  scopeToFolder: boolean;  // Only see agents in same cwd
 }
 
 export interface Dirs {

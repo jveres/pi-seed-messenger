@@ -241,6 +241,11 @@ Priority (highest to lowest):
 ```json
 {
   "autoRegister": false,
+  "autoRegisterPaths": [
+    "~/projects/team-collab",
+    "~/.pi/agent/extensions/web-search"
+  ],
+  "scopeToFolder": true,
   "contextMode": "full",
   "registrationContext": true,
   "replyHint": true,
@@ -250,11 +255,32 @@ Priority (highest to lowest):
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| `autoRegister` | Join mesh on startup (old behavior) | `false` |
+| `autoRegister` | Join mesh on startup (global) | `false` |
+| `autoRegisterPaths` | Paths where auto-register is enabled | `[]` |
+| `scopeToFolder` | Only see agents in same directory | `false` |
 | `contextMode` | `"full"` / `"minimal"` / `"none"` | `"full"` |
 | `registrationContext` | Orientation message on join | `true` |
 | `replyHint` | Include reply syntax in messages | `true` |
 | `senderDetailsOnFirstContact` | Show sender's cwd/model first time | `true` |
+
+**Path-based auto-register**: Instead of global auto-register, specify folders where agents should auto-join. Supports `~` expansion and glob patterns (`~/work/*` matches any subfolder).
+
+**Folder scoping**: When `scopeToFolder: true`, agents only see other agents in the same working directory. Broadcasts are scoped, but direct messaging by name still works across folders. Useful when running multiple projects simultaneously.
+
+### Managing Auto-Register Paths
+
+**Via tool (for agents):**
+```typescript
+pi_messenger({ autoRegisterPath: "add" })     // Add current folder
+pi_messenger({ autoRegisterPath: "remove" })  // Remove current folder
+pi_messenger({ autoRegisterPath: "list" })    // Show all paths
+```
+
+**Via TUI (for users):**
+```
+/messenger config
+```
+Opens an overlay to add/remove paths with keyboard navigation (`a` to add, `d` to delete, arrows to navigate).
 
 ## How It Works
 
