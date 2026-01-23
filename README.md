@@ -177,6 +177,11 @@ pi_messenger({ autoRegisterPath: "list" })
 
 File-based coordination. No daemon. Dead agents detected via PID and cleaned up automatically.
 
+## Credits
+
+- **[mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail)** by [@doodlestein](https://x.com/doodlestein) — Inspiration for agent-to-agent messaging
+- **[Pi coding agent](https://github.com/badlogic/pi-mono/)** by [@badlogicgames](https://x.com/badlogicgames)
+
 ## License
 
 MIT
