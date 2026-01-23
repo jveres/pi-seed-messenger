@@ -9,6 +9,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)]()
 
+> ⚠️ **Beta** — This extension is still in active development and not fully tested. More updates coming soon—stay tuned for the official release!
+
 ```typescript
 pi_messenger({ join: true, spec: "./tasks.md" })
 pi_messenger({ claim: "TASK-01", reason: "Implementing login flow" })
