@@ -21,8 +21,19 @@ import {
   type AgentRegistration,
 } from "./lib.js";
 import * as store from "./store.js";
+import * as crewStore from "./crew/store.js";
+import {
+  renderCrewContent,
+  renderCrewStatusBar,
+  createCrewViewState,
+  toggleEpicExpansion,
+  navigateEpic,
+  getSelectedEpicId,
+  type CrewViewState,
+} from "./crew-overlay.js";
 
 const AGENTS_TAB = "[agents]";
+const CREW_TAB = "[crew]";
 
 export class MessengerOverlay implements Component, Focusable {
   readonly width = 80;
@@ -32,6 +43,8 @@ export class MessengerOverlay implements Component, Focusable {
   private inputText = "";
   private scrollPosition = 0;
   private cachedAgents: AgentRegistration[] | null = null;
+  private crewViewState: CrewViewState = createCrewViewState();
+  private cwd: string;
 
   constructor(
     private tui: TUI,
@@ -40,12 +53,21 @@ export class MessengerOverlay implements Component, Focusable {
     private dirs: Dirs,
     private done: () => void
   ) {
+    this.cwd = process.cwd();
     const agents = this.getAgentsSorted();
     const withUnread = agents.find(a => (state.unreadCounts.get(a.name) ?? 0) > 0);
     this.selectedAgent = withUnread?.name ?? agents[0]?.name ?? null;
 
     if (this.selectedAgent) {
       state.unreadCounts.set(this.selectedAgent, 0);
+    }
+
+    // Auto-expand active epics
+    const epics = crewStore.listEpics(this.cwd);
+    for (const epic of epics) {
+      if (epic.status === "active" || epic.status === "planning") {
+        this.crewViewState.expandedEpics.add(epic.id);
+      }
     }
   }
 
@@ -60,11 +82,15 @@ export class MessengerOverlay implements Component, Focusable {
     return agents.some(agent => agent.spec);
   }
 
+  private hasAnyEpics(): boolean {
+    return crewStore.listEpics(this.cwd).length > 0;
+  }
+
   private getMessages(): AgentMailMessage[] {
     if (this.selectedAgent === null) {
       return this.state.broadcastHistory;
     }
-    if (this.selectedAgent === AGENTS_TAB) {
+    if (this.selectedAgent === AGENTS_TAB || this.selectedAgent === CREW_TAB) {
       return [];
     }
     return this.state.chatHistory.get(this.selectedAgent) ?? [];
@@ -72,7 +98,7 @@ export class MessengerOverlay implements Component, Focusable {
 
   private selectTab(agentName: string | null): void {
     this.selectedAgent = agentName;
-    if (agentName && agentName !== AGENTS_TAB) {
+    if (agentName && agentName !== AGENTS_TAB && agentName !== CREW_TAB) {
       this.state.unreadCounts.set(agentName, 0);
     }
     this.scrollPosition = 0;
@@ -87,15 +113,14 @@ export class MessengerOverlay implements Component, Focusable {
   handleInput(data: string): void {
     const agents = this.getAgentsSorted();
 
-    if (agents.length === 0) {
-      if (matchesKey(data, "escape")) {
-        this.done();
-      }
+    // Allow escape always
+    if (matchesKey(data, "escape")) {
+      this.done();
       return;
     }
 
-    if (matchesKey(data, "escape")) {
-      this.done();
+    // If no agents AND no epics, only allow escape
+    if (agents.length === 0 && !this.hasAnyEpics()) {
       return;
     }
 
@@ -112,31 +137,62 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (matchesKey(data, "up")) {
-      this.scroll(1);
+      if (this.selectedAgent === CREW_TAB) {
+        // Navigate epics in crew view
+        const epics = crewStore.listEpics(this.cwd);
+        navigateEpic(this.crewViewState, -1, epics.length);
+      } else {
+        this.scroll(1);
+      }
       this.tui.requestRender();
       return;
     }
 
     if (matchesKey(data, "down")) {
-      this.scroll(-1);
+      if (this.selectedAgent === CREW_TAB) {
+        // Navigate epics in crew view
+        const epics = crewStore.listEpics(this.cwd);
+        navigateEpic(this.crewViewState, 1, epics.length);
+      } else {
+        this.scroll(-1);
+      }
       this.tui.requestRender();
       return;
     }
 
     if (matchesKey(data, "home")) {
-      const messages = this.getMessages();
-      this.scrollPosition = Math.max(0, messages.length - 1);
+      if (this.selectedAgent === CREW_TAB) {
+        this.crewViewState.selectedEpicIndex = 0;
+        this.crewViewState.scrollOffset = 0;
+      } else {
+        const messages = this.getMessages();
+        this.scrollPosition = Math.max(0, messages.length - 1);
+      }
       this.tui.requestRender();
       return;
     }
 
     if (matchesKey(data, "end")) {
-      this.scrollPosition = 0;
+      if (this.selectedAgent === CREW_TAB) {
+        const epics = crewStore.listEpics(this.cwd);
+        this.crewViewState.selectedEpicIndex = Math.max(0, epics.length - 1);
+      } else {
+        this.scrollPosition = 0;
+      }
       this.tui.requestRender();
       return;
     }
 
     if (matchesKey(data, "enter")) {
+      if (this.selectedAgent === CREW_TAB) {
+        // Toggle epic expansion
+        const epicId = getSelectedEpicId(this.cwd, this.crewViewState);
+        if (epicId) {
+          toggleEpicExpansion(this.crewViewState, epicId);
+        }
+        this.tui.requestRender();
+        return;
+      }
       if (this.selectedAgent !== AGENTS_TAB && this.inputText.trim()) {
         this.sendMessage(agents);
       }
@@ -158,7 +214,14 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private cycleTab(direction: number, agents: AgentRegistration[]): void {
-    const tabNames = [AGENTS_TAB, ...agents.map(a => a.name), null];
+    // Build tab list: Agents, Crew (if epics exist), individual agents, All
+    const tabNames: (string | null)[] = [AGENTS_TAB];
+    if (this.hasAnyEpics()) {
+      tabNames.push(CREW_TAB);
+    }
+    tabNames.push(...agents.map(a => a.name));
+    tabNames.push(null); // "All" broadcast tab
+
     const currentIdx = this.selectedAgent === null
       ? tabNames.length - 1
       : tabNames.indexOf(this.selectedAgent);
@@ -222,9 +285,13 @@ export class MessengerOverlay implements Component, Focusable {
     const innerW = w - 2;
     const agents = this.getAgentsSorted();
 
-    if (this.selectedAgent && this.selectedAgent !== AGENTS_TAB && !agents.find(a => a.name === this.selectedAgent)) {
-      this.selectedAgent = agents[0]?.name ?? null;
-      this.scrollPosition = 0;  // Reset scroll when auto-switching due to agent death
+    // Handle agent death - don't reset if we're on a meta tab (AGENTS_TAB, CREW_TAB)
+    if (this.selectedAgent && 
+        this.selectedAgent !== AGENTS_TAB && 
+        this.selectedAgent !== CREW_TAB && 
+        !agents.find(a => a.name === this.selectedAgent)) {
+      this.selectedAgent = agents[0]?.name ?? (this.hasAnyEpics() ? CREW_TAB : AGENTS_TAB);
+      this.scrollPosition = 0;
     }
 
     const border = (s: string) => this.theme.fg("dim", s);
@@ -243,7 +310,7 @@ export class MessengerOverlay implements Component, Focusable {
     const rightBorder = borderLen - leftBorder;
     lines.push(border("╭" + "─".repeat(leftBorder)) + titleText + border("─".repeat(rightBorder) + "╮"));
 
-    if (agents.length === 0) {
+    if (agents.length === 0 && !this.hasAnyEpics()) {
       // Simple empty state - no height filling
       lines.push(emptyRow());
       lines.push(emptyRow());
@@ -292,10 +359,26 @@ export class MessengerOverlay implements Component, Focusable {
     const hasAnySpec = this.hasAnySpec(agents);
     const mode = getDisplayMode(agents);
 
+    // Agents tab
     const isAgentsSelected = this.selectedAgent === AGENTS_TAB;
     let agentsTab = isAgentsSelected ? "▸ " : "";
     agentsTab += this.theme.fg("accent", "Agents");
     parts.push(agentsTab);
+
+    // Crew tab (only if epics exist)
+    if (this.hasAnyEpics()) {
+      const isCrewSelected = this.selectedAgent === CREW_TAB;
+      let crewTab = isCrewSelected ? "▸ " : "";
+      crewTab += this.theme.fg("accent", "Crew");
+      
+      // Show active epic count
+      const epics = crewStore.listEpics(this.cwd);
+      const activeCount = epics.filter(e => e.status === "active" || e.status === "planning").length;
+      if (activeCount > 0) {
+        crewTab += ` (${activeCount})`;
+      }
+      parts.push(crewTab);
+    }
 
     for (const agent of agents) {
       const isSelected = this.selectedAgent === agent.name;
@@ -337,6 +420,10 @@ export class MessengerOverlay implements Component, Focusable {
   private renderMessages(width: number, height: number, agents: AgentRegistration[]): string[] {
     if (this.selectedAgent === AGENTS_TAB) {
       return this.renderAgentsOverview(width, height, agents);
+    }
+
+    if (this.selectedAgent === CREW_TAB) {
+      return renderCrewContent(this.theme, this.cwd, width, height, this.crewViewState);
     }
 
     const messages = this.getMessages();
@@ -577,6 +664,11 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private renderInputBar(width: number): string {
+    // Crew tab has a status bar instead of input
+    if (this.selectedAgent === CREW_TAB) {
+      return renderCrewStatusBar(this.theme, this.cwd, width);
+    }
+
     const prompt = this.theme.fg("accent", "> ");
 
     let placeholder: string;

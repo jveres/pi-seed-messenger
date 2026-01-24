@@ -1,5 +1,99 @@
 # Changelog
 
+## 0.6.0 - 2026-01-23
+
+### Added
+
+**Crew: Task Orchestration** - A complete multi-agent task orchestration system for complex epics.
+
+- **Epics & Tasks** - Hierarchical work items with dependency tracking
+  - `epic.create`, `epic.show`, `epic.list`, `epic.close`, `epic.set_spec`
+  - `task.create`, `task.show`, `task.list`, `task.start`, `task.done`, `task.block`, `task.unblock`, `task.ready`, `task.reset`
+
+- **Planning** - Automated task breakdown with parallel scouts
+  - `plan` action runs 7 scout agents in parallel to analyze codebase
+  - Gap analyst synthesizes findings into task graph with dependencies
+  - Supports planning from idea (`idea: true`) or existing epic
+
+- **Work Execution** - Parallel worker spawning with concurrency control
+  - `work` action executes ready tasks (dependencies satisfied)
+  - `autonomous: true` flag for continuous wave execution until done/blocked
+  - Configurable concurrency for scouts (default: 4) and workers (default: 2)
+  - Auto-blocks tasks after `maxAttemptsPerTask` failures
+
+- **Code Review** - Automated review with verdicts
+  - `review` action for implementation (git diff) or plan review
+  - SHIP / NEEDS_WORK / MAJOR_RETHINK verdicts with detailed feedback
+
+- **Interview** - Clarification question generation
+  - `interview` action generates 20-40 deep questions
+  - Outputs JSON file for pi's interview tool
+
+- **Sync** - Downstream spec updates
+  - `sync` action updates dependent task specs after completion
+
+- **Checkpoints** - State save/restore for recovery
+  - `checkpoint.save`, `checkpoint.restore`, `checkpoint.delete`, `checkpoint.list`
+
+- **Status & Maintenance**
+  - `crew.status` - Overall crew status with progress metrics
+  - `crew.validate` - Validate epic structure and dependencies
+  - `crew.agents` - List available crew agents by role
+  - `crew.install` / `crew.uninstall` - Agent management
+
+- **Crew Overlay Tab** - Visual epic/task tree in `/messenger` overlay
+  - Tab bar shows "Crew (N)" with active epic count
+  - Expand/collapse epics with Enter key
+  - Status icons: ✓ done, ● in_progress, ○ todo, ✗ blocked
+  - Shows assigned agent, dependencies, and block reasons
+  - Autonomous mode status bar: wave number, progress, ready count, timer
+
+- **12 Crew Agents** - Auto-installed on first use of `plan`, `work`, or `review`
+  - 7 scouts: repo, practice, docs, github, epic, docs-gap, memory
+  - Plus: worker, reviewer, gap-analyst, interview-generator, plan-sync
+
+- **Action-based API** - Consistent `action` parameter pattern
+  - Example: `pi_messenger({ action: "epic.create", title: "OAuth Login" })`
+  - 24 new crew actions, 38 total actions through one tool
+
+### Storage
+
+New directory `.pi/messenger/crew/` (per-project):
+- `epics/*.json` - Epic metadata
+- `specs/*.md` - Epic specifications  
+- `tasks/*.json` - Task metadata
+- `tasks/*.md` - Task specifications
+- `blocks/*.md` - Block context for blocked tasks
+- `checkpoints/` - Saved state snapshots
+- `artifacts/` - Debug artifacts (input/output/jsonl per run)
+- `config.json` - Project-level config overrides
+
+### Configuration
+
+New `crew` section in `~/.pi/agent/pi-messenger.json`:
+```json
+{
+  "crew": {
+    "concurrency": { "scouts": 4, "workers": 2 },
+    "review": { "enabled": true, "maxIterations": 3 },
+    "work": { "maxAttemptsPerTask": 5, "maxWaves": 50 },
+    "artifacts": { "enabled": true, "cleanupDays": 7 }
+  }
+}
+```
+
+### Fixed
+
+- 12 bugs fixed during implementation review:
+  - **Critical:** `loadCrewConfig` called with wrong path in plan.ts and work.ts
+  - Double-counting bug in work.ts (tasks in both `failed` and `blocked` arrays)
+  - O(n²) complexity in plan.ts task creation loop
+  - O(n²) complexity in agents.ts worker spawn loop
+  - Invalid status icon map in epic.ts (missing `blocked`, `archived`)
+  - Various unused imports and variables cleaned up
+
+---
+
 ## 0.5.1 - 2026-01-22
 
 ### Added

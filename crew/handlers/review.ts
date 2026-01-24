@@ -1,0 +1,331 @@
+/**
+ * Crew - Review Handler
+ * 
+ * Spawns reviewer with git diff context for task or plan review.
+ */
+
+import { execSync } from "node:child_process";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { MessengerState, Dirs } from "../../lib.js";
+import type { CrewParams } from "../types.js";
+import { result } from "../utils/result.js";
+import { spawnAgents } from "../agents.js";
+import { discoverCrewAgents } from "../utils/discover.js";
+import * as store from "../store.js";
+
+export async function execute(
+  params: CrewParams,
+  _state: MessengerState,
+  _dirs: Dirs,
+  ctx: ExtensionContext
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const { target, type } = params;
+
+  if (!target) {
+    return result("Error: target (task ID or epic ID) required for review action.", {
+      mode: "review",
+      error: "missing_target"
+    });
+  }
+
+  // Check for reviewer agent
+  const availableAgents = discoverCrewAgents(cwd);
+  const hasReviewer = availableAgents.some(a => a.name === "crew-reviewer");
+  if (!hasReviewer) {
+    return result("Error: crew-reviewer agent not found. Required for code review.", {
+      mode: "review",
+      error: "no_reviewer"
+    });
+  }
+
+  // Determine review type from target
+  const isTaskId = target.includes(".");
+  const reviewType = type ?? (isTaskId ? "impl" : "plan");
+
+  if (reviewType === "impl") {
+    return reviewImplementation(cwd, target);
+  } else {
+    return reviewPlan(cwd, target);
+  }
+}
+
+// =============================================================================
+// Implementation Review
+// =============================================================================
+
+async function reviewImplementation(cwd: string, taskId: string) {
+  const task = store.getTask(cwd, taskId);
+  if (!task) {
+    return result(`Error: Task ${taskId} not found.`, {
+      mode: "review",
+      error: "task_not_found",
+      target: taskId
+    });
+  }
+
+  if (task.status !== "done" && task.status !== "in_progress") {
+    return result(`Error: Task ${taskId} is ${task.status}. Can only review in_progress or done tasks.`, {
+      mode: "review",
+      error: "invalid_status",
+      status: task.status
+    });
+  }
+
+  // Get git diff
+  const baseCommit = task.base_commit;
+  if (!baseCommit) {
+    return result(`Error: Task ${taskId} has no base_commit. Cannot generate diff.`, {
+      mode: "review",
+      error: "no_base_commit"
+    });
+  }
+
+  const diff = getGitDiff(baseCommit, cwd);
+  const commitLog = getCommitLog(baseCommit, cwd);
+
+  // Get task and epic specs for context
+  const taskSpec = store.getTaskSpec(cwd, taskId) ?? "";
+  const epic = store.getEpic(cwd, task.epic_id);
+
+  // Build review prompt
+  const prompt = `# Code Review Request
+
+## Task Information
+
+**Task ID:** ${taskId}
+**Task Title:** ${task.title}
+**Epic:** ${task.epic_id} - ${epic?.title ?? "Unknown"}
+
+## Task Specification
+
+${taskSpec || "*No spec available*"}
+
+## Changes
+
+### Commits
+${commitLog || "*No commits*"}
+
+### Diff
+\`\`\`diff
+${diff}
+\`\`\`
+
+## Your Review
+
+Review this implementation following the crew-reviewer protocol.
+Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback.`;
+
+  // Spawn reviewer
+  const [reviewResult] = await spawnAgents([{
+    agent: "crew-reviewer",
+    task: prompt
+  }], 1, cwd);
+
+  if (reviewResult.exitCode !== 0) {
+    return result(`Error: Reviewer failed: ${reviewResult.error ?? "Unknown error"}`, {
+      mode: "review",
+      error: "reviewer_failed"
+    });
+  }
+
+  // Parse verdict from output
+  const verdict = parseVerdict(reviewResult.output);
+
+  const text = `# Review: ${taskId}
+
+**Verdict:** ${verdict.verdict}
+
+${verdict.summary}
+
+${verdict.issues.length > 0 ? `## Issues\n${verdict.issues.map(i => `- ${i}`).join("\n")}` : ""}
+
+${verdict.suggestions.length > 0 ? `## Suggestions\n${verdict.suggestions.map(s => `- ${s}`).join("\n")}` : ""}
+
+${verdict.verdict === "SHIP" ? "✅ Ready to merge!" : verdict.verdict === "NEEDS_WORK" ? "⚠️ Address issues and re-review." : "🔄 Consider re-planning this task."}`;
+
+  return result(text, {
+    mode: "review",
+    type: "impl",
+    taskId,
+    verdict: verdict.verdict,
+    issueCount: verdict.issues.length,
+    suggestionCount: verdict.suggestions.length
+  });
+}
+
+// =============================================================================
+// Plan Review
+// =============================================================================
+
+async function reviewPlan(cwd: string, epicId: string) {
+  const epic = store.getEpic(cwd, epicId);
+  if (!epic) {
+    return result(`Error: Epic ${epicId} not found.`, {
+      mode: "review",
+      error: "epic_not_found",
+      target: epicId
+    });
+  }
+
+  const epicSpec = store.getEpicSpec(cwd, epicId);
+  const tasks = store.getTasks(cwd, epicId);
+
+  // Build task overview
+  const taskOverview = tasks.map(t => {
+    const spec = store.getTaskSpec(cwd, t.id);
+    const deps = t.depends_on.length > 0 ? ` (deps: ${t.depends_on.join(", ")})` : "";
+    const specPreview = spec && !spec.includes("*Spec pending*")
+      ? `\n  ${spec.slice(0, 200)}${spec.length > 200 ? "..." : ""}`
+      : "";
+    return `- ${t.id}: ${t.title}${deps}${specPreview}`;
+  }).join("\n");
+
+  // Build review prompt
+  const prompt = `# Plan Review Request
+
+## Epic Information
+
+**Epic ID:** ${epicId}
+**Epic Title:** ${epic.title}
+**Status:** ${epic.status}
+**Tasks:** ${tasks.length}
+
+## Epic Specification
+
+${epicSpec || "*No spec available*"}
+
+## Task Breakdown
+
+${taskOverview || "*No tasks*"}
+
+## Your Review
+
+Review this plan for:
+1. Completeness - Are all requirements covered?
+2. Task granularity - Are tasks appropriately sized?
+3. Dependencies - Are dependencies correct and complete?
+4. Gaps - Are there missing tasks or edge cases?
+5. Order - Is the execution order optimal?
+
+Output your verdict as SHIP (plan is solid), NEEDS_WORK (minor adjustments), or MAJOR_RETHINK (fundamental issues).`;
+
+  // Spawn reviewer
+  const [reviewResult] = await spawnAgents([{
+    agent: "crew-reviewer",
+    task: prompt
+  }], 1, cwd);
+
+  if (reviewResult.exitCode !== 0) {
+    return result(`Error: Reviewer failed: ${reviewResult.error ?? "Unknown error"}`, {
+      mode: "review",
+      error: "reviewer_failed"
+    });
+  }
+
+  // Parse verdict
+  const verdict = parseVerdict(reviewResult.output);
+
+  const text = `# Plan Review: ${epicId}
+
+**Verdict:** ${verdict.verdict}
+
+${verdict.summary}
+
+${verdict.issues.length > 0 ? `## Issues\n${verdict.issues.map(i => `- ${i}`).join("\n")}` : ""}
+
+${verdict.suggestions.length > 0 ? `## Suggestions\n${verdict.suggestions.map(s => `- ${s}`).join("\n")}` : ""}
+
+${verdict.verdict === "SHIP" ? "✅ Plan is ready for execution!" : verdict.verdict === "NEEDS_WORK" ? "⚠️ Adjust plan before starting work." : "🔄 Consider re-planning with more context."}`;
+
+  return result(text, {
+    mode: "review",
+    type: "plan",
+    epicId,
+    verdict: verdict.verdict,
+    issueCount: verdict.issues.length,
+    suggestionCount: verdict.suggestions.length
+  });
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+function getGitDiff(baseCommit: string, cwd: string): string {
+  try {
+    const diff = execSync(
+      `git diff ${baseCommit}..HEAD`,
+      { cwd, encoding: "utf-8", maxBuffer: 5 * 1024 * 1024 }
+    );
+    // Truncate very long diffs
+    if (diff.length > 50000) {
+      return diff.slice(0, 50000) + "\n\n[Diff truncated - too large]";
+    }
+    return diff || "*No changes*";
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return `*Failed to get diff: ${message}*`;
+  }
+}
+
+function getCommitLog(baseCommit: string, cwd: string): string {
+  try {
+    return execSync(
+      `git log ${baseCommit}..HEAD --oneline --no-decorate`,
+      { cwd, encoding: "utf-8" }
+    ).trim() || "*No commits*";
+  } catch {
+    return "*No commits*";
+  }
+}
+
+interface ReviewVerdict {
+  verdict: "SHIP" | "NEEDS_WORK" | "MAJOR_RETHINK";
+  summary: string;
+  issues: string[];
+  suggestions: string[];
+}
+
+function parseVerdict(output: string): ReviewVerdict {
+  const result: ReviewVerdict = {
+    verdict: "NEEDS_WORK",
+    summary: "",
+    issues: [],
+    suggestions: []
+  };
+
+  // Extract verdict
+  const verdictMatch = output.match(/##\s*Verdict:\s*(SHIP|NEEDS_WORK|MAJOR_RETHINK)/i);
+  if (verdictMatch) {
+    result.verdict = verdictMatch[1].toUpperCase() as ReviewVerdict["verdict"];
+  }
+
+  // Extract summary (text between Verdict and next ##)
+  const summaryMatch = output.match(/##\s*Verdict:.*?\n([\s\S]*?)(?=\n##|$)/i);
+  if (summaryMatch) {
+    result.summary = summaryMatch[1].trim();
+  }
+
+  // Extract issues
+  const issuesMatch = output.match(/##\s*Issues?\s*\n([\s\S]*?)(?=\n##|$)/i);
+  if (issuesMatch) {
+    result.issues = issuesMatch[1]
+      .split("\n")
+      .filter(line => line.trim().startsWith("-") || line.trim().startsWith("*"))
+      .map(line => line.replace(/^[\s\-*]+/, "").trim())
+      .filter(Boolean);
+  }
+
+  // Extract suggestions
+  const suggestionsMatch = output.match(/##\s*Suggestions?\s*\n([\s\S]*?)(?=\n##|$)/i);
+  if (suggestionsMatch) {
+    result.suggestions = suggestionsMatch[1]
+      .split("\n")
+      .filter(line => line.trim().startsWith("-") || line.trim().startsWith("*"))
+      .map(line => line.replace(/^[\s\-*]+/, "").trim())
+      .filter(Boolean);
+  }
+
+  return result;
+}

@@ -1,0 +1,277 @@
+/**
+ * Crew - Work Handler
+ * 
+ * Spawns workers for ready tasks with concurrency control.
+ */
+
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { MessengerState, Dirs } from "../../lib.js";
+import type { CrewParams, AppendEntryFn, Task } from "../types.js";
+import { result } from "../utils/result.js";
+import { spawnAgents } from "../agents.js";
+import { loadCrewConfig } from "../utils/config.js";
+import { discoverCrewAgents } from "../utils/discover.js";
+import * as store from "../store.js";
+import { getCrewDir } from "../store.js";
+import { autonomousState, startAutonomous, stopAutonomous, addWaveResult } from "../state.js";
+
+export async function execute(
+  params: CrewParams,
+  _state: MessengerState,
+  _dirs: Dirs,
+  ctx: ExtensionContext,
+  appendEntry: AppendEntryFn
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const config = loadCrewConfig(getCrewDir(cwd));
+  const { target, autonomous, concurrency: concurrencyOverride } = params;
+
+  if (!target) {
+    return result("Error: target (epic ID) required for work action.", {
+      mode: "work",
+      error: "missing_target"
+    });
+  }
+
+  // Verify epic exists
+  const epic = store.getEpic(cwd, target);
+  if (!epic) {
+    return result(`Error: Epic ${target} not found.`, {
+      mode: "work",
+      error: "epic_not_found",
+      target
+    });
+  }
+
+  // Check for worker agent
+  const availableAgents = discoverCrewAgents(cwd);
+  const hasWorker = availableAgents.some(a => a.name === "crew-worker");
+  if (!hasWorker) {
+    return result("Error: crew-worker agent not found. Required for task execution.", {
+      mode: "work",
+      error: "no_worker"
+    });
+  }
+
+  // Get ready tasks
+  const readyTasks = store.getReadyTasks(cwd, target);
+
+  if (readyTasks.length === 0) {
+    const tasks = store.getTasks(cwd, target);
+    const inProgress = tasks.filter(t => t.status === "in_progress");
+    const blocked = tasks.filter(t => t.status === "blocked");
+    const done = tasks.filter(t => t.status === "done");
+
+    let reason = "";
+    if (done.length === tasks.length) {
+      reason = "All tasks are done! Epic is complete.";
+    } else if (inProgress.length > 0) {
+      reason = `${inProgress.length} task(s) in progress: ${inProgress.map(t => t.id).join(", ")}`;
+    } else if (blocked.length > 0) {
+      reason = `${blocked.length} task(s) blocked: ${blocked.map(t => `${t.id} (${t.blocked_reason})`).join(", ")}`;
+    } else {
+      reason = "All remaining tasks have unmet dependencies.";
+    }
+
+    return result(`No ready tasks in ${target}.\n\n${reason}`, {
+      mode: "work",
+      epicId: target,
+      ready: [],
+      reason,
+      inProgress: inProgress.map(t => t.id),
+      blocked: blocked.map(t => t.id)
+    });
+  }
+
+  // Determine concurrency
+  const concurrency = concurrencyOverride ?? config.concurrency.workers;
+  const tasksToRun = readyTasks.slice(0, concurrency);
+
+  // If autonomous mode, set up state and persist
+  if (autonomous) {
+    startAutonomous(target, cwd);
+    appendEntry("crew-state", autonomousState);
+  }
+
+  // Spawn workers
+  const workerTasks = tasksToRun.map(task => ({
+    agent: "crew-worker",
+    task: buildWorkerPrompt(task, epic.id, epic.title, cwd)
+  }));
+
+  const workerResults = await spawnAgents(
+    workerTasks,
+    concurrency,
+    cwd
+  );
+
+  // Process results
+  const succeeded: string[] = [];
+  const failed: string[] = [];
+  const blocked: string[] = [];
+
+  for (let i = 0; i < workerResults.length; i++) {
+    const r = workerResults[i];
+    const taskId = tasksToRun[i].id;
+    const task = store.getTask(cwd, taskId);
+
+    if (r.exitCode === 0) {
+      // Check if task was completed (worker should call task.done)
+      if (task?.status === "done") {
+        succeeded.push(taskId);
+      } else if (task?.status === "blocked") {
+        blocked.push(taskId);
+      } else {
+        // Worker finished but didn't complete - treat as failure
+        failed.push(taskId);
+      }
+    } else {
+      // Auto-block on failure if in autonomous mode
+      if (autonomous && task?.status === "in_progress") {
+        store.blockTask(cwd, taskId, `Worker failed: ${r.error ?? "Unknown error"}`);
+        blocked.push(taskId);
+      } else {
+        failed.push(taskId);
+      }
+    }
+  }
+
+  // If autonomous, record wave and check for continuation
+  if (autonomous) {
+    addWaveResult({
+      waveNumber: autonomousState.waveNumber,
+      tasksAttempted: tasksToRun.map(t => t.id),
+      succeeded,
+      failed,
+      blocked,
+      timestamp: new Date().toISOString()
+    });
+
+    // Check if we should continue
+    const nextReady = store.getReadyTasks(cwd, target);
+    const allTasks = store.getTasks(cwd, target);
+    const allDone = allTasks.every(t => t.status === "done");
+    const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
+
+    if (allDone) {
+      stopAutonomous("completed");
+      appendEntry("crew-state", autonomousState);
+      appendEntry("crew_wave_complete", {
+        epicId: target,
+        status: "completed",
+        totalWaves: autonomousState.waveNumber,
+        totalTasks: allTasks.length
+      });
+    } else if (allBlockedOrDone || nextReady.length === 0) {
+      stopAutonomous("blocked");
+      appendEntry("crew-state", autonomousState);
+      appendEntry("crew_wave_blocked", {
+        epicId: target,
+        status: "blocked",
+        blockedTasks: allTasks.filter(t => t.status === "blocked").map(t => t.id)
+      });
+    } else {
+      // Persist state for session recovery and signal continuation
+      appendEntry("crew-state", autonomousState);
+      appendEntry("crew_wave_continue", {
+        epicId: target,
+        nextWave: autonomousState.waveNumber + 1,
+        readyTasks: nextReady.map(t => t.id)
+      });
+    }
+  }
+
+  // Build result
+  const updatedEpic = store.getEpic(cwd, target);
+  const progress = updatedEpic 
+    ? `${updatedEpic.completed_count}/${updatedEpic.task_count}`
+    : "unknown";
+
+  let statusText = "";
+  if (succeeded.length > 0) statusText += `\n✅ Completed: ${succeeded.join(", ")}`;
+  if (failed.length > 0) statusText += `\n❌ Failed: ${failed.join(", ")}`;
+  if (blocked.length > 0) statusText += `\n🚫 Blocked: ${blocked.join(", ")}`;
+
+  const nextReady = store.getReadyTasks(cwd, target);
+  const nextText = nextReady.length > 0
+    ? `\n\n**Ready for next wave:** ${nextReady.map(t => t.id).join(", ")}`
+    : "";
+
+  const text = `# Work Wave ${autonomous ? autonomousState.waveNumber : 1} - ${target}
+
+**Tasks attempted:** ${tasksToRun.length}
+**Epic progress:** ${progress}
+${statusText}${nextText}
+
+${autonomous && nextReady.length > 0 ? "Autonomous mode: Continuing to next wave..." : ""}`;
+
+  return result(text, {
+    mode: "work",
+    epicId: target,
+    wave: autonomous ? autonomousState.waveNumber : 1,
+    attempted: tasksToRun.map(t => t.id),
+    succeeded,
+    failed,
+    blocked,
+    nextReady: nextReady.map(t => t.id),
+    autonomous: !!autonomous
+  });
+}
+
+// =============================================================================
+// Worker Prompt Builder
+// =============================================================================
+
+function buildWorkerPrompt(task: Task, epicId: string, epicTitle: string, cwd: string): string {
+  const taskSpec = store.getTaskSpec(cwd, task.id);
+  const epicSpec = store.getEpicSpec(cwd, epicId);
+
+  let prompt = `# Task Assignment
+
+**Task ID:** ${task.id}
+**Task Title:** ${task.title}
+**Epic ID:** ${epicId}
+**Epic Title:** ${epicTitle}
+
+## Your Mission
+
+Implement this task following the crew-worker protocol:
+1. Join the mesh
+2. Re-anchor by reading specs
+3. Start task and reserve files
+4. Implement the feature
+5. Commit your changes
+6. Release reservations and mark complete
+
+`;
+
+  if (taskSpec && !taskSpec.includes("*Spec pending*")) {
+    prompt += `## Task Specification
+
+${taskSpec}
+
+`;
+  }
+
+  if (task.depends_on.length > 0) {
+    prompt += `## Dependencies
+
+This task depends on: ${task.depends_on.join(", ")}
+These tasks are already complete - you can reference their implementations.
+
+`;
+  }
+
+  if (epicSpec && !epicSpec.includes("*Spec pending*")) {
+    // Include truncated epic spec for context
+    const truncatedSpec = epicSpec.length > 2000 
+      ? epicSpec.slice(0, 2000) + "\n\n[Spec truncated - read full spec from .pi/messenger/crew/specs/${epicId}.md]"
+      : epicSpec;
+    prompt += `## Epic Context
+
+${truncatedSpec}
+`;
+  }
+
+  return prompt;
+}

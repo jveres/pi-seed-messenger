@@ -26,6 +26,11 @@ import * as handlers from "./handlers.js";
 import { MessengerOverlay } from "./overlay.js";
 import { MessengerConfigOverlay } from "./config-overlay.js";
 import { loadConfig, matchesAutoRegisterPath, type MessengerConfig } from "./config.js";
+import { executeCrewAction } from "./crew/index.js";
+import type { CrewParams } from "./crew/types.js";
+import { autonomousState, restoreAutonomousState, stopAutonomous } from "./crew/state.js";
+import { loadCrewConfig } from "./crew/utils/config.js";
+import * as crewStore from "./crew/store.js";
 
 let overlayTui: TUI | null = null;
 
@@ -148,7 +153,17 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     const countStr = theme.fg("dim", ` (${count} peer${count === 1 ? "" : "s"})`);
     const unreadStr = totalUnread > 0 ? theme.fg("accent", ` ●${totalUnread}`) : "";
 
-    ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${unreadStr}`);
+    // Add crew status if autonomous mode is active
+    let crewStr = "";
+    if (autonomousState.active && autonomousState.epicId) {
+      const cwd = ctx.cwd ?? process.cwd();
+      const epic = crewStore.getEpic(cwd, autonomousState.epicId);
+      if (epic) {
+        crewStr = theme.fg("accent", ` ⚡${epic.completed_count}/${epic.task_count}`);
+      }
+    }
+
+    ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${unreadStr}${crewStr}`);
   }
 
   // ===========================================================================
@@ -158,37 +173,81 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "pi_messenger",
     label: "Pi Messenger",
-    description: `Communicate with other pi agents and manage file reservations.
+    description: `Multi-agent coordination and task orchestration.
 
-Usage:
+Usage (action-based API - preferred):
+  // Coordination
+  pi_messenger({ action: "join" })                              → Join mesh
+  pi_messenger({ action: "status" })                            → Get status
+  pi_messenger({ action: "list" })                              → List agents
+  pi_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
+  pi_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
+  
+  // Crew: Epics
+  pi_messenger({ action: "epic.create", title: "OAuth" })       → Create epic
+  pi_messenger({ action: "epic.show", id: "c-1-abc" })         → Show epic
+  pi_messenger({ action: "epic.list" })                         → List epics
+  
+  // Crew: Tasks
+  pi_messenger({ action: "task.create", title: "Routes", epic: "c-1-abc" })
+  pi_messenger({ action: "task.start", id: "c-1-abc.1" })      → Start task
+  pi_messenger({ action: "task.done", id: "c-1-abc.1", summary: "..." })
+  pi_messenger({ action: "task.ready", epic: "c-1-abc" })      → Ready tasks
+  
+  // Crew: Orchestration
+  pi_messenger({ action: "plan", target: "c-1-abc" })          → Plan epic
+  pi_messenger({ action: "work", target: "c-1-abc", autonomous: true })
+  pi_messenger({ action: "review", target: "c-1-abc.1" })      → Review impl
+
+Legacy (backwards compatible):
   pi_messenger({ join: true })                   → Join the agent mesh
-  pi_messenger({ join: true, spec: "path" })     → Join and set working spec
-  pi_messenger({ })                              → Status (your name, peers, spec, claim)
-  pi_messenger({ list: true })                   → List agents with specs/claims
-  pi_messenger({ swarm: true })                  → All specs' claims/completions
-  pi_messenger({ swarm: true, spec: "path" })    → One spec's claims/completions
-  pi_messenger({ claim: "TASK-01" })             → Claim a task in your spec
-  pi_messenger({ complete: "TASK-01", notes: "..." }) → Mark task complete
-  pi_messenger({ unclaim: "TASK-01" })           → Release claim without completing
-  pi_messenger({ spec: "path" })                 → Set/change your working spec
-  pi_messenger({ to: "Name", message: "hi" })    → Send message to one agent
-  pi_messenger({ to: ["A", "B"], message: "..." })  → Send to multiple agents
-  pi_messenger({ broadcast: true, message: "..." }) → Send to ALL active agents
-  pi_messenger({ reserve: ["src/auth/"] })       → Reserve files (trailing slash for directories)
-  pi_messenger({ release: ["src/auth/"] })       → Release specific reservations
-  pi_messenger({ release: true })                → Release all your reservations
-  pi_messenger({ rename: "NewName" })            → Rename yourself
-  pi_messenger({ autoRegisterPath: "add" })      → Add current folder to auto-register list
-  pi_messenger({ autoRegisterPath: "remove" })   → Remove current folder from auto-register list
-  pi_messenger({ autoRegisterPath: "list" })     → Show all auto-register paths
+  pi_messenger({ claim: "TASK-01" })             → Claim a swarm task
+  pi_messenger({ to: "Name", message: "hi" })    → Send message
 
-Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > reserve > release > rename > autoRegisterPath > list > status`,
+Mode: action (if provided) > legacy key-based routing`,
     parameters: Type.Object({
+      // ═══════════════════════════════════════════════════════════════════════
+      // ACTION PARAMETER (preferred for new usage)
+      // ═══════════════════════════════════════════════════════════════════════
+      action: Type.Optional(Type.String({
+        description: "Action to perform (e.g., 'join', 'epic.create', 'task.start', 'work')"
+      })),
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // CREW PARAMETERS
+      // ═══════════════════════════════════════════════════════════════════════
+      id: Type.Optional(Type.String({ description: "Crew epic or task ID (c-N-xxx or c-N-xxx.M)" })),
+      taskId: Type.Optional(Type.String({ description: "Swarm task ID (e.g., TASK-01) - for action-based claim/unclaim/complete" })),
+      title: Type.Optional(Type.String({ description: "Title for epic.create, task.create" })),
+      epic: Type.Optional(Type.String({ description: "Parent epic ID for task.create, task.list, task.ready" })),
+      dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task depends on (for task.create)" })),
+      target: Type.Optional(Type.String({ description: "Target for plan, work, review, interview, sync" })),
+      idea: Type.Optional(Type.Boolean({ description: "Treat target as idea text, not epic ID" })),
+      summary: Type.Optional(Type.String({ description: "Summary for task.done" })),
+      evidence: Type.Optional(Type.Object({
+        commits: Type.Optional(Type.Array(Type.String())),
+        tests: Type.Optional(Type.Array(Type.String())),
+        prs: Type.Optional(Type.Array(Type.String()))
+      }, { description: "Evidence for task.done" })),
+      content: Type.Optional(Type.String({ description: "Spec content for epic.set_spec" })),
+      type: Type.Optional(Type.Union([
+        Type.Literal("plan"),
+        Type.Literal("impl")
+      ], { description: "Review type (inferred from target if omitted)" })),
+      autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
+      concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
+      cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
+      paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
+      name: Type.Optional(Type.String({ description: "New name for rename action" })),
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // EXISTING COORDINATION PARAMETERS (backwards compatibility)
+      // ═══════════════════════════════════════════════════════════════════════
       join: Type.Optional(Type.Boolean({ description: "Join the agent mesh" })),
       spec: Type.Optional(Type.String({ description: "Path to spec/plan file" })),
-      claim: Type.Optional(Type.String({ description: "Task ID to claim" })),
-      unclaim: Type.Optional(Type.String({ description: "Task ID to release" })),
-      complete: Type.Optional(Type.String({ description: "Task ID to mark complete" })),
+      claim: Type.Optional(Type.String({ description: "Task ID to claim (legacy - use action: 'claim' with taskId)" })),
+      unclaim: Type.Optional(Type.String({ description: "Task ID to release (legacy)" })),
+      complete: Type.Optional(Type.String({ description: "Task ID to mark complete (legacy)" })),
       notes: Type.Optional(Type.String({ description: "Completion notes" })),
       swarm: Type.Optional(Type.Boolean({ description: "Get swarm status" })),
       to: Type.Optional(Type.Union([
@@ -198,13 +257,13 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
       broadcast: Type.Optional(Type.Boolean({ description: "Send to all active agents" })),
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
-      reserve: Type.Optional(Type.Array(Type.String(), { description: "Paths to reserve" })),
-      reason: Type.Optional(Type.String({ description: "Reason for reservation" })),
+      reserve: Type.Optional(Type.Array(Type.String(), { description: "Paths to reserve (legacy - use action: 'reserve' with paths)" })),
+      reason: Type.Optional(Type.String({ description: "Reason for reservation or claim" })),
       release: Type.Optional(Type.Union([
         Type.Array(Type.String()),
         Type.Boolean()
-      ], { description: "Patterns to release (array) or true to release all (boolean)" })),
-      rename: Type.Optional(Type.String({ description: "Rename yourself to a new name" })),
+      ], { description: "Patterns to release (array) or true to release all (legacy)" })),
+      rename: Type.Optional(Type.String({ description: "Rename yourself (legacy - use action: 'rename' with name)" })),
       autoRegisterPath: Type.Optional(Type.Union([
         Type.Literal("add"),
         Type.Literal("remove"),
@@ -213,7 +272,7 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
       list: Type.Optional(Type.Boolean({ description: "List other agents" }))
     }),
 
-    async execute(_toolCallId, params: {
+    async execute(_toolCallId, params: CrewParams & {
       join?: boolean;
       spec?: string;
       claim?: string;
@@ -233,6 +292,7 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
       list?: boolean;
     }, _onUpdate, ctx, _signal) {
       const {
+        action,
         join,
         spec,
         claim,
@@ -251,6 +311,26 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
         autoRegisterPath,
         list
       } = params;
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // ACTION-BASED ROUTING (preferred)
+      // ═══════════════════════════════════════════════════════════════════════
+      if (action) {
+        return executeCrewAction(
+          action,
+          params,
+          state,
+          dirs,
+          ctx,
+          deliverMessage,
+          updateStatus,
+          (type, data) => pi.appendEntry(type, data)
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // LEGACY KEY-BASED ROUTING (backwards compatibility)
+      // ═══════════════════════════════════════════════════════════════════════
 
       // Join doesn't require registration
       if (join) {
@@ -376,6 +456,13 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
   // ===========================================================================
 
   pi.on("session_start", async (_event, ctx) => {
+    // Restore crew autonomous state from session entries
+    for (const entry of ctx.sessionManager.getEntries()) {
+      if (entry.type === "custom" && entry.customType === "crew-state") {
+        restoreAutonomousState(entry.data as Parameters<typeof restoreAutonomousState>[0]);
+      }
+    }
+
     // Check if auto-register is enabled (global or path-based)
     const shouldAutoRegister = config.autoRegister || 
       matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
@@ -423,6 +510,59 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
     store.processAllPendingMessages(state, dirs, deliverMessage);
     recoverWatcherIfNeeded();
     updateStatus(ctx);
+  });
+
+  // ===========================================================================
+  // Crew Autonomous Mode Continuation
+  // ===========================================================================
+
+  pi.on("agent_end", async (_event, ctx) => {
+    // Only continue if autonomous mode is active
+    if (!autonomousState.active || !autonomousState.epicId) return;
+
+    const cwd = autonomousState.cwd ?? ctx.cwd ?? process.cwd();
+    const crewDir = join(cwd, ".pi", "messenger", "crew");
+    const crewConfig = loadCrewConfig(crewDir);
+
+    // Check max waves limit
+    if (autonomousState.waveNumber >= crewConfig.work.maxWaves) {
+      stopAutonomous("manual");
+      if (ctx.hasUI) {
+        ctx.ui.notify(`Autonomous stopped: max waves (${crewConfig.work.maxWaves}) reached`, "warning");
+      }
+      return;
+    }
+
+    // Check for ready tasks
+    const readyTasks = crewStore.getReadyTasks(cwd, autonomousState.epicId);
+    
+    if (readyTasks.length === 0) {
+      // No ready tasks - check if all done or blocked
+      const allTasks = crewStore.getTasks(cwd, autonomousState.epicId);
+      const allDone = allTasks.every(t => t.status === "done");
+      
+      stopAutonomous(allDone ? "completed" : "blocked");
+      
+      if (ctx.hasUI) {
+        if (allDone) {
+          ctx.ui.notify(`✅ All tasks complete in ${autonomousState.epicId}!`, "info");
+        } else {
+          const blocked = allTasks.filter(t => t.status === "blocked");
+          ctx.ui.notify(`Autonomous stopped: ${blocked.length} task(s) blocked`, "warning");
+        }
+      }
+      return;
+    }
+
+    // Continue to next wave
+    pi.sendMessage({
+      customType: "crew_continue",
+      content: `Continuing autonomous work on ${autonomousState.epicId}. Wave ${autonomousState.waveNumber + 1} with ${readyTasks.length} ready task(s).`,
+      display: true
+    }, { triggerTurn: true, deliverAs: "steer" });
+
+    // The steer message will trigger the LLM to call work again
+    // Optionally, we could inject the command directly, but steer is safer
   });
 
   pi.on("session_shutdown", async () => {
