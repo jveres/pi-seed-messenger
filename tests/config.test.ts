@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createTempCrewDirs, type TempCrewDirs } from "./helpers/temp-dirs.js";
+import { createTempDirs, type TempDirs } from "./helpers/temp-dirs.js";
 
 const homedirMock = vi.hoisted(() => vi.fn());
 
@@ -23,33 +23,33 @@ function writeJson(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 }
 
-describe("config autoOverlayPlanning", () => {
-  let dirs: TempCrewDirs;
+describe("config", () => {
+  let dirs: TempDirs;
 
   beforeEach(() => {
-    dirs = createTempCrewDirs();
+    dirs = createTempDirs();
     homedirMock.mockReset();
     homedirMock.mockReturnValue(path.join(dirs.root, ".pi-home"));
   });
 
-  it("defaults autoOverlayPlanning to true", async () => {
+  it("defaults autoStatus to true", async () => {
     const { loadConfig } = await loadConfigModule();
     const cfg = loadConfig(dirs.cwd);
-    expect(cfg.autoOverlayPlanning).toBe(true);
+    expect(cfg.autoStatus).toBe(true);
   });
 
-  it("applies project override for autoOverlayPlanning", async () => {
+  it("applies project override for autoRegister", async () => {
     const homeDir = path.join(dirs.root, ".pi-home");
     writeJson(path.join(homeDir, ".pi", "agent", "pi-messenger.json"), {
-      autoOverlayPlanning: true,
+      autoRegister: false,
     });
     writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
-      autoOverlayPlanning: false,
+      autoRegister: true,
     });
 
     const { loadConfig } = await loadConfigModule();
     const cfg = loadConfig(dirs.cwd);
 
-    expect(cfg.autoOverlayPlanning).toBe(false);
+    expect(cfg.autoRegister).toBe(true);
   });
 });

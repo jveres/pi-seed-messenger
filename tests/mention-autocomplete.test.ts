@@ -13,7 +13,7 @@ vi.mock("@mariozechner/pi-tui", () => ({
   visibleWidth: (s: string) => s.length,
 }));
 
-import { createCrewViewState, handleMessageInput, type CrewViewState } from "../overlay-actions.js";
+import { createViewState, handleMessageInput, type ViewState } from "../overlay-actions.js";
 import type { MessengerState, Dirs } from "../lib.js";
 import type { TUI } from "@mariozechner/pi-tui";
 
@@ -27,21 +27,9 @@ vi.mock("../store.js", () => ({
   getClaims: () => ({}),
 }));
 
-vi.mock("../crew/live-progress.js", () => ({
-  getLiveWorkers: () => new Map([
-    ["task-1", { name: "jade-elk", taskId: "task-1" }],
-  ]),
-  hasLiveWorkers: () => false,
-  onLiveWorkersChanged: () => () => {},
-}));
-
 vi.mock("../feed.js", () => ({
   logFeedEvent: vi.fn(),
   readFeedEvents: () => [],
-}));
-
-vi.mock("../crew/registry.js", () => ({
-  hasActiveWorker: () => false,
 }));
 
 function makeState(): MessengerState {
@@ -56,26 +44,26 @@ function makeTui(): TUI {
   return { requestRender: vi.fn() } as unknown as TUI;
 }
 
-function sendTab(vs: CrewViewState, state: MessengerState, dirs: Dirs, tui: TUI) {
+function sendTab(vs: ViewState, state: MessengerState, dirs: Dirs, tui: TUI) {
   handleMessageInput("\t", vs, state, dirs, "/tmp/cwd", tui);
 }
 
-function sendShiftTab(vs: CrewViewState, state: MessengerState, dirs: Dirs, tui: TUI) {
+function sendShiftTab(vs: ViewState, state: MessengerState, dirs: Dirs, tui: TUI) {
   handleMessageInput("\x1b[Z", vs, state, dirs, "/tmp/cwd", tui);
 }
 
-function type(char: string, vs: CrewViewState, state: MessengerState, dirs: Dirs, tui: TUI) {
+function type(char: string, vs: ViewState, state: MessengerState, dirs: Dirs, tui: TUI) {
   handleMessageInput(char, vs, state, dirs, "/tmp/cwd", tui);
 }
 
 describe("mention autocomplete", () => {
-  let vs: CrewViewState;
+  let vs: ViewState;
   let state: MessengerState;
   let dirs: Dirs;
   let tui: TUI;
 
   beforeEach(() => {
-    vs = createCrewViewState();
+    vs = createViewState();
     vs.inputMode = "message";
     state = makeState();
     dirs = makeDirs();
@@ -115,12 +103,6 @@ describe("mention autocomplete", () => {
     vs.messageInput = "@cor";
     sendTab(vs, state, dirs, tui);
     expect(vs.messageInput).toBe("@coral-fox ");
-  });
-
-  it("includes live workers in candidates", () => {
-    vs.messageInput = "@jade";
-    sendTab(vs, state, dirs, tui);
-    expect(vs.messageInput).toBe("@jade-elk ");
   });
 
   it("includes @all in candidates", () => {

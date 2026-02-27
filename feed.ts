@@ -16,23 +16,6 @@ export type FeedEventType =
   | "commit"
   | "test"
   | "edit"
-  | "task.start"
-  | "task.done"
-  | "task.block"
-  | "task.unblock"
-  | "task.reset"
-  | "task.delete"
-  | "task.split"
-  | "task.revise"
-  | "task.revise-tree"
-  | "plan.start"
-  | "plan.pass.start"
-  | "plan.pass.done"
-  | "plan.review.start"
-  | "plan.review.done"
-  | "plan.done"
-  | "plan.cancel"
-  | "plan.failed"
   | "stuck";
 
 export interface FeedEvent {
@@ -98,31 +81,9 @@ export function pruneFeed(cwd: string, maxEvents: number): void {
   }
 }
 
-const CREW_EVENT_TYPES = new Set<FeedEventType>([
-  "task.start",
-  "task.done",
-  "task.block",
-  "task.unblock",
-  "task.reset",
-  "task.delete",
-  "task.split",
-  "task.revise",
-  "task.revise-tree",
-  "plan.start",
-  "plan.pass.start",
-  "plan.pass.done",
-  "plan.review.start",
-  "plan.review.done",
-  "plan.done",
-  "plan.cancel",
-  "plan.failed",
-]);
-
 export function formatFeedLine(event: FeedEvent): string {
   const time = new Date(event.ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-  const isCrew = CREW_EVENT_TYPES.has(event.type);
-  const prefix = isCrew ? "[Crew] " : "";
-  let line = `${time} ${prefix}${event.agent}`;
+  let line = `${time} ${event.agent}`;
 
   const rawPreview = event.preview?.trim();
   const preview = rawPreview
@@ -151,31 +112,10 @@ export function formatFeedLine(event: FeedEvent): string {
       line += preview ? ` ran tests (${preview})` : " ran tests";
       break;
     case "edit": line += ` editing ${event.target ?? ""}`; break;
-    case "task.start": line += withPreview(` started ${event.target ?? ""}`); break;
-    case "task.done": line += withPreview(` completed ${event.target ?? ""}`); break;
-    case "task.block": line += withPreview(` blocked ${event.target ?? ""}`); break;
-    case "task.unblock": line += withPreview(` unblocked ${event.target ?? ""}`); break;
-    case "task.reset": line += withPreview(` reset ${event.target ?? ""}`); break;
-    case "task.delete": line += withPreview(` deleted ${event.target ?? ""}`); break;
-    case "task.split": line += withPreview(` split ${event.target ?? ""}`); break;
-    case "task.revise": line += withPreview(` revised ${event.target ?? ""}`); break;
-    case "task.revise-tree": line += withPreview(` revised ${event.target ?? ""} + dependents`); break;
-    case "plan.start": line += withPreview(" planning started"); break;
-    case "plan.pass.start": line += withPreview(" planning pass started"); break;
-    case "plan.pass.done": line += withPreview(" planning pass finished"); break;
-    case "plan.review.start": line += withPreview(" planning review started"); break;
-    case "plan.review.done": line += withPreview(" planning review finished"); break;
-    case "plan.done": line += withPreview(" planning completed"); break;
-    case "plan.cancel": line += " planning cancelled"; break;
-    case "plan.failed": line += withPreview(" planning failed"); break;
     case "stuck": line += " appears stuck"; break;
     default: line += ` ${event.type}`; break;
   }
   return line;
-}
-
-export function isCrewEvent(type: FeedEventType): boolean {
-  return CREW_EVENT_TYPES.has(type);
 }
 
 export function logFeedEvent(

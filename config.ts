@@ -26,9 +26,6 @@ export interface MessengerConfig {
   stuckThreshold: number;
   stuckNotify: boolean;
   autoStatus: boolean;
-  autoOverlay: boolean;
-  autoOverlayPlanning: boolean;
-  crewEventsInFeed: boolean;
 }
 
 const DEFAULT_CONFIG: MessengerConfig = {
@@ -44,9 +41,6 @@ const DEFAULT_CONFIG: MessengerConfig = {
   stuckThreshold: 900,
   stuckNotify: true,
   autoStatus: true,
-  autoOverlay: true,
-  autoOverlayPlanning: true,
-  crewEventsInFeed: true,
 };
 
 function readJsonFile(path: string): Record<string, unknown> | null {
@@ -159,9 +153,6 @@ export function loadConfig(cwd: string): MessengerConfig {
     stuckThreshold: typeof merged.stuckThreshold === "number" ? merged.stuckThreshold : DEFAULT_CONFIG.stuckThreshold,
     stuckNotify: merged.stuckNotify !== false,
     autoStatus: merged.autoStatus !== false,
-    autoOverlay: merged.autoOverlay !== false,
-    autoOverlayPlanning: merged.autoOverlayPlanning !== false,
-    crewEventsInFeed: merged.crewEventsInFeed !== false,
   };
 
   if (merged.contextMode === "none") {

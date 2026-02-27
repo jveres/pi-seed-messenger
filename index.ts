@@ -41,40 +41,12 @@ import * as handlers from "./handlers.js";
 import { MessengerOverlay, type OverlayCallbacks } from "./overlay.js";
 import { MessengerConfigOverlay } from "./config-overlay.js";
 import { loadConfig, matchesAutoRegisterPath, type MessengerConfig } from "./config.js";
-import { executeCrewAction } from "./crew/index.js";
 import { logFeedEvent, pruneFeed } from "./feed.js";
-import type { CrewParams } from "./crew/types.js";
-import {
-  autonomousState,
-  clearPlanningState,
-  consumePendingAutoWork,
-  consumePlanningOverlayPending,
-  dismissPlanningOverlayRun,
-  getPlanningOverlayPending,
-  isPlanningForCwd,
-  isPlanningStalled,
-  markPlanningOverlayPending,
-  planningState,
-  restoreAutonomousState,
-  restorePlanningState,
-  stopAutonomous,
-} from "./crew/state.js";
-import { loadCrewConfig } from "./crew/utils/config.js";
-import * as crewStore from "./crew/store.js";
-import { runLegacyAgentCleanupMigration } from "./crew/utils/install.js";
-import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
-import { shutdownAllWorkers } from "./crew/agents.js";
-import { shutdownLobbyWorkers } from "./crew/lobby.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
-let overlayOpening = false;
 
 export default function piMessengerExtension(pi: ExtensionAPI) {
-  // One-time migration: remove stale crew agents from shared ~/.pi/agent/agents/
-  // (crew agents now discovered from extension-local directory)
-  runLegacyAgentCleanupMigration();
-
   // ===========================================================================
   // State & Configuration
   // ===========================================================================
@@ -192,7 +164,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     const currentlyStuck = new Set<string>();
 
     for (const agent of peers) {
-      const hasTask = agentHasTask(agent.name, allClaims, crewStore.getTasks(agent.cwd));
+      const hasTask = agentHasTask(agent.name, allClaims);
       const computed = computeStatus(
         agent.activity?.lastActivityAt ?? agent.startedAt,
         hasTask,
@@ -254,36 +226,11 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     const countStr = theme.fg("dim", ` (${count} peer${count === 1 ? "" : "s"})`);
     const unreadStr = totalUnread > 0 ? theme.fg("accent", ` ●${totalUnread}`) : "";
 
-    const planningCwd = ctx.cwd ?? process.cwd();
-    const planningStr =
-      isPlanningForCwd(planningCwd)
-        ? theme.fg(
-            "warning",
-            ` · plan ${planningState.pass}/${planningState.maxPasses} ${planningState.phase}${isPlanningStalled(planningCwd) ? " stalled" : ""}`,
-          )
-        : "";
-
-    const activityStr = !planningStr && state.activity.currentActivity
+    const activityStr = state.activity.currentActivity
       ? theme.fg("dim", ` · ${state.activity.currentActivity}`)
       : "";
 
-    // Add crew status if autonomous mode is active
-    let crewStr = "";
-    if (autonomousState.active) {
-      const cwd = ctx.cwd ?? process.cwd();
-      const plan = crewStore.getPlan(cwd);
-      if (plan) {
-        const workerCount = getLiveWorkers(cwd).size;
-        crewStr = theme.fg("accent", ` ⚡${plan.completed_count}/${plan.task_count}`);
-        if (workerCount > 0) {
-          crewStr += theme.fg("dim", ` 🔨${workerCount}`);
-        }
-      }
-    }
-
-    ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${unreadStr}${planningStr}${activityStr}${crewStr}`);
-
-    maybeAutoOpenCrewOverlay(ctx);
+    ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${unreadStr}${activityStr}`);
   }
 
   function clearAllUnreadCounts(): void {
@@ -309,10 +256,6 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     statusHeartbeatTimer = null;
   }
 
-  onLiveWorkersChanged(() => {
-    if (latestCtx) updateStatus(latestCtx);
-  });
-
   // ===========================================================================
   // Registration Context
   // ===========================================================================
@@ -324,7 +267,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       : folder;
     pi.sendMessage({
       customType: "messenger_context",
-      content: `You are agent "${state.agentName}" in ${locationPart}. Use pi_messenger({ action: "status" }) to see crew status, pi_messenger({ action: "work" }) to run tasks.`,
+      content: `You are agent "${state.agentName}" in ${locationPart}. Use pi_messenger({ action: "status" }) to see who's online.`,
       display: false
     }, { triggerTurn: false });
   }
@@ -336,9 +279,9 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "pi_messenger",
     label: "Pi Messenger",
-    description: `Multi-agent coordination and task orchestration.
+    description: `Multi-agent messaging and coordination.
 
-Usage (action-based API - preferred):
+Usage (action-based API):
   // Coordination
   pi_messenger({ action: "join" })                              → Join mesh
   pi_messenger({ action: "status" })                            → Get status
@@ -347,68 +290,11 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "whois", name: "AgentName" })          → Agent details
   pi_messenger({ action: "set_status", message: "reviewing" })  → Set custom status
   pi_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
-  pi_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
-  
-  // Crew: Plan from PRD
-  pi_messenger({ action: "plan" })                              → Auto-discover PRD
-  pi_messenger({ action: "plan", prd: "docs/PRD.md" })          → Explicit PRD path
-  pi_messenger({ action: "plan", prompt: "Scan for bugs" })     → Inline prompt (no PRD)
-  pi_messenger({ action: "plan.cancel" })                       → Cancel active planning
-  
-  // Crew: Work through tasks
-  pi_messenger({ action: "work" })                              → Run ready tasks
-  pi_messenger({ action: "work", autonomous: true })            → Run until done/blocked
-  
-  // Crew: Tasks
-  pi_messenger({ action: "task.show", id: "task-1" })           → Show task
-  pi_messenger({ action: "task.list" })                         → List all tasks
-  pi_messenger({ action: "task.split", id: "task-3" })          → Inspect task for splitting
-  pi_messenger({ action: "task.split", id: "task-3", subtasks: [...] }) → Execute split
-  pi_messenger({ action: "task.start", id: "task-1" })          → Start task
-  pi_messenger({ action: "task.done", id: "task-1", summary: "..." })
-  pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
-  
-  // Crew: Review
-  pi_messenger({ action: "review", target: "task-1" })          → Review impl`,
+  pi_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message`,
     parameters: Type.Object({
       action: Type.Optional(Type.String({
-        description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
+        description: "Action to perform (e.g., 'join', 'status', 'list', 'send')"
       })),
-
-      // ═══════════════════════════════════════════════════════════════════════
-      // CREW PARAMETERS
-      // ═══════════════════════════════════════════════════════════════════════
-      prd: Type.Optional(Type.String({ description: "PRD file path for plan action" })),
-      prompt: Type.Optional(Type.String({ description: "Inline prompt for plan action, or revision instructions for task.revise/task.revise-tree" })),
-      id: Type.Optional(Type.String({ description: "Task ID (task-N format)" })),
-      taskId: Type.Optional(Type.String({ description: "Swarm task ID (e.g., TASK-01) - for action-based claim/unclaim/complete" })),
-      title: Type.Optional(Type.String({ description: "Title for task.create" })),
-      dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task depends on (for task.create)" })),
-      target: Type.Optional(Type.String({ description: "Task ID for review action" })),
-      summary: Type.Optional(Type.String({ description: "Summary for task.done" })),
-      evidence: Type.Optional(Type.Object({
-        commits: Type.Optional(Type.Array(Type.String())),
-        tests: Type.Optional(Type.Array(Type.String())),
-        prs: Type.Optional(Type.Array(Type.String()))
-      }, { description: "Evidence for task.done" })),
-      content: Type.Optional(Type.String({ description: "Content for task spec" })),
-      count: Type.Optional(Type.Number({ description: "Suggested number of subtasks for task.split" })),
-      subtasks: Type.Optional(Type.Array(
-        Type.Object({
-          title: Type.String(),
-          content: Type.Optional(Type.String()),
-        }),
-        { description: "Subtask definitions for task.split (execute phase)" }
-      )),
-      type: Type.Optional(StringEnum(["plan", "impl"], { description: "Review type (inferred from target if omitted)" })),
-      autoWork: Type.Optional(Type.Boolean({ description: "Auto-start autonomous work after plan completes (default: true, pass false to review plan first)" })),
-      autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
-      concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
-      model: Type.Optional(Type.String({ description: "Override worker model for this work wave" })),
-      cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
-      limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
-      paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
-      name: Type.Optional(Type.String({ description: "New name for rename action" })),
 
       // ═══════════════════════════════════════════════════════════════════════
       // MESSAGING & COORDINATION PARAMETERS
@@ -418,37 +304,135 @@ Usage (action-based API - preferred):
       to: Type.Optional(Type.Any({ description: "Target agent name (string) or multiple names (array)" })),
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
-      reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, or task block" })),
+      reason: Type.Optional(Type.String({ description: "Reason for reservation" })),
+      taskId: Type.Optional(Type.String({ description: "Task ID for claim/unclaim/complete" })),
+      paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
+      name: Type.Optional(Type.String({ description: "Agent name for whois/rename" })),
+      limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
     }),
 
-    async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
-      const params = rawParams as CrewParams;
+    async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
+      const params = rawParams as Record<string, unknown>;
       latestCtx = ctx;
 
-      const action = params.action;
+      const action = params.action as string | undefined;
       if (!action) {
         return handlers.executeStatus(state, dirs, ctx.cwd ?? process.cwd());
       }
 
-      const result = await executeCrewAction(
-        action,
-        params,
-        state,
-        dirs,
-        ctx,
-        deliverMessage,
-        updateStatus,
-        (type, data) => pi.appendEntry(type, data),
-        { stuckThreshold: config.stuckThreshold, crewEventsInFeed: config.crewEventsInFeed, nameTheme, feedRetention: config.feedRetention },
-        signal
-      );
-
-      if (action === "join" && state.registered && config.registrationContext) {
-        sendRegistrationContext(ctx);
+      // ═══════════════════════════════════════════════════════════════════════
+      // Actions that DON'T require registration
+      // ═══════════════════════════════════════════════════════════════════════
+      if (action === "join") {
+        const result = handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, params.spec as string | undefined, nameTheme, config.feedRetention);
+        if (state.registered && config.registrationContext) {
+          sendRegistrationContext(ctx);
+        }
+        return result;
       }
 
-      return result;
+      if (action === "autoRegisterPath") {
+        const subAction = params.autoRegisterPath as "add" | "remove" | "list" | undefined;
+        if (!subAction) {
+          return { content: [{ type: "text" as const, text: "Error: autoRegisterPath requires value ('add', 'remove', or 'list')." }], details: { mode: "autoRegisterPath", error: "missing_value" } };
+        }
+        return handlers.executeAutoRegisterPath(subAction);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // All other actions require registration
+      // ═══════════════════════════════════════════════════════════════════════
+      if (!state.registered) {
+        return handlers.notRegisteredError();
+      }
+
+      const cwd = ctx.cwd ?? process.cwd();
+
+      switch (action) {
+        case "status":
+          return handlers.executeStatus(state, dirs, cwd);
+
+        case "list":
+          return handlers.executeList(state, dirs, cwd, { stuckThreshold: config.stuckThreshold });
+
+        case "whois": {
+          const name = params.name as string | undefined;
+          if (!name) {
+            return { content: [{ type: "text" as const, text: "Error: name required for whois action." }], details: { mode: "whois", error: "missing_name" } };
+          }
+          return handlers.executeWhois(state, dirs, cwd, name, { stuckThreshold: config.stuckThreshold });
+        }
+
+        case "set_status":
+          return handlers.executeSetStatus(state, dirs, ctx, params.message as string | undefined);
+
+        case "feed":
+          return handlers.executeFeed(cwd, params.limit as number | undefined);
+
+        case "spec": {
+          const specPath = params.spec as string | undefined;
+          if (!specPath) {
+            return { content: [{ type: "text" as const, text: "Error: spec path required." }], details: { mode: "spec", error: "missing_spec" } };
+          }
+          return handlers.executeSetSpec(state, dirs, ctx, specPath);
+        }
+
+        case "send":
+          return handlers.executeSend(state, dirs, cwd, params.to as string | string[] | undefined, false, params.message as string | undefined, params.replyTo as string | undefined);
+
+        case "broadcast":
+          return handlers.executeSend(state, dirs, cwd, undefined, true, params.message as string | undefined, params.replyTo as string | undefined);
+
+        case "reserve": {
+          const paths = params.paths as string[] | undefined;
+          if (!paths || paths.length === 0) {
+            return { content: [{ type: "text" as const, text: "Error: paths required for reserve action." }], details: { mode: "reserve", error: "missing_paths" } };
+          }
+          return handlers.executeReserve(state, dirs, ctx, paths, params.reason as string | undefined);
+        }
+
+        case "release":
+          return handlers.executeRelease(state, dirs, ctx, (params.paths as string[] | undefined) ?? true);
+
+        case "rename": {
+          const newName = params.name as string | undefined;
+          if (!newName) {
+            return { content: [{ type: "text" as const, text: "Error: name required for rename action." }], details: { mode: "rename", error: "missing_name" } };
+          }
+          return handlers.executeRename(state, dirs, ctx, newName, deliverMessage, updateStatus);
+        }
+
+        case "swarm":
+          return handlers.executeSwarm(state, dirs, params.spec as string | undefined);
+
+        case "claim": {
+          const taskId = params.taskId as string | undefined;
+          if (!taskId) {
+            return { content: [{ type: "text" as const, text: "Error: taskId required for claim action." }], details: { mode: "claim", error: "missing_taskId" } };
+          }
+          return handlers.executeClaim(state, dirs, ctx, taskId, params.spec as string | undefined, params.reason as string | undefined);
+        }
+
+        case "unclaim": {
+          const taskId = params.taskId as string | undefined;
+          if (!taskId) {
+            return { content: [{ type: "text" as const, text: "Error: taskId required for unclaim action." }], details: { mode: "unclaim", error: "missing_taskId" } };
+          }
+          return handlers.executeUnclaim(state, dirs, taskId, params.spec as string | undefined);
+        }
+
+        case "complete": {
+          const taskId = params.taskId as string | undefined;
+          if (!taskId) {
+            return { content: [{ type: "text" as const, text: "Error: taskId required for complete action." }], details: { mode: "complete", error: "missing_taskId" } };
+          }
+          return handlers.executeComplete(state, dirs, taskId, params.notes as string | undefined, params.spec as string | undefined);
+        }
+
+        default:
+          return { content: [{ type: "text" as const, text: `Unknown action: ${action}` }], details: { mode: "error", error: "unknown_action", action } };
+      }
     }
   });
 
@@ -493,7 +477,7 @@ Usage (action-based API - preferred):
         onBackground: (snapshotText) => {
           overlayHandle?.setHidden(true);
           pi.sendMessage({
-            customType: "crew_snapshot",
+            customType: "messenger_snapshot",
             content: snapshotText,
             display: true,
           }, { triggerTurn: true });
@@ -515,7 +499,7 @@ Usage (action-based API - preferred):
 
       if (snapshot) {
         pi.sendMessage({
-          customType: "crew_snapshot",
+          customType: "messenger_snapshot",
           content: snapshot,
           display: true,
         }, { triggerTurn: true });
@@ -750,15 +734,6 @@ Usage (action-based API - preferred):
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
     startStatusHeartbeat();
-    for (const entry of ctx.sessionManager.getEntries()) {
-      if (entry.type === "custom" && entry.customType === "crew-state") {
-        restoreAutonomousState(entry.data as Parameters<typeof restoreAutonomousState>[0]);
-      }
-    }
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
-    if (staleCleared && ctx.hasUI) {
-      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
-    }
 
     state.isHuman = ctx.hasUI;
     try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
@@ -767,7 +742,6 @@ Usage (action-based API - preferred):
       matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
 
     if (!shouldAutoRegister) {
-      maybeAutoOpenCrewOverlay(ctx);
       return;
     }
 
@@ -782,8 +756,6 @@ Usage (action-based API - preferred):
         sendRegistrationContext(ctx);
       }
     }
-
-    maybeAutoOpenCrewOverlay(ctx);
   });
 
   function recoverWatcherIfNeeded(): void {
@@ -793,131 +765,29 @@ Usage (action-based API - preferred):
     }
   }
 
-  function maybeAutoOpenCrewOverlay(ctx: ExtensionContext): void {
-    const cwd = ctx.cwd ?? process.cwd();
-    if (config.autoOverlayPlanning) {
-      markPlanningOverlayPending(cwd);
-    }
-
-    const autonomousPending =
-      config.autoOverlay &&
-      autonomousState.active &&
-      autonomousState.autoOverlayPending;
-
-    const planningPending =
-      config.autoOverlayPlanning ? getPlanningOverlayPending(cwd) : null;
-
-    if ((!autonomousPending && !planningPending) || !ctx.hasUI || overlayTui || overlayOpening) {
-      return;
-    }
-
-    if (autonomousPending) {
-      autonomousState.autoOverlayPending = false;
-    }
-
-    const planningRunId = planningPending
-      ? consumePlanningOverlayPending(cwd)?.runId ?? null
-      : null;
-
-    overlayOpening = true;
-    const callbacks: OverlayCallbacks = {
-      onBackground: (snapshotText) => {
-        overlayHandle?.setHidden(true);
-        pi.sendMessage({
-          customType: "crew_snapshot",
-          content: snapshotText,
-          display: true,
-        }, { triggerTurn: true });
-      },
-    };
-
-    ctx.ui.custom<string | undefined>(
-      (tui, theme, _keybindings, done) => {
-        overlayTui = tui;
-        return new MessengerOverlay(tui, theme, state, dirs, done, callbacks);
-      },
-      {
-        overlay: true,
-        onHandle: (handle) => {
-          overlayHandle = handle;
-        },
-      }
-    ).then((snapshot) => {
-      if (planningRunId) {
-        dismissPlanningOverlayRun(planningRunId);
-      }
-      if (snapshot) {
-        pi.sendMessage({
-          customType: "crew_snapshot",
-          content: snapshot,
-          display: true,
-        }, { triggerTurn: true });
-      }
-      clearAllUnreadCounts();
-      overlayOpening = false;
-      overlayHandle = null;
-      overlayTui = null;
-      updateStatus(ctx);
-    }).catch(() => {
-      overlayOpening = false;
-      overlayHandle = null;
-      overlayTui = null;
-      if (config.autoOverlayPlanning) {
-        markPlanningOverlayPending(cwd);
-      }
-    });
-  }
-
   pi.on("session_switch", async (_event, ctx) => {
     latestCtx = ctx;
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
-    if (staleCleared && ctx.hasUI) {
-      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
-    }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
-    maybeAutoOpenCrewOverlay(ctx);
   });
   pi.on("session_fork", async (_event, ctx) => {
     latestCtx = ctx;
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
-    if (staleCleared && ctx.hasUI) {
-      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
-    }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
-    maybeAutoOpenCrewOverlay(ctx);
   });
   pi.on("session_tree", async (_event, ctx) => {
     latestCtx = ctx;
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
-    if (staleCleared && ctx.hasUI) {
-      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
-    }
     updateStatus(ctx);
-    maybeAutoOpenCrewOverlay(ctx);
   });
 
-  pi.on("turn_end", async (event, ctx) => {
+  pi.on("turn_end", async (_event, ctx) => {
     latestCtx = ctx;
     store.processAllPendingMessages(state, dirs, deliverMessage);
-    const lobbyId = process.env.PI_LOBBY_ID;
-    if (lobbyId) {
-      const cwd = ctx.cwd ?? process.cwd();
-      const aliveFile = join(cwd, ".pi", "messenger", "crew", `lobby-${lobbyId}.alive`);
-      if (fs.existsSync(aliveFile)) {
-        pi.sendMessage({
-          customType: "lobby_keepalive",
-          content: "[Keep-alive] Planning in progress. No task assigned yet. Acknowledge with a single period.",
-          display: false,
-        }, { triggerTurn: true, deliverAs: "steer" });
-      }
-    }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
 
     if (state.registered) {
-      const msg = event.message as unknown as Record<string, unknown> | undefined;
+      const msg = _event.message as unknown as Record<string, unknown> | undefined;
       if (msg && msg.role === "assistant" && msg.usage) {
         const usage = msg.usage as { totalTokens?: number; input?: number; output?: number };
         const total = usage.totalTokens ?? ((usage.input ?? 0) + (usage.output ?? 0));
@@ -927,93 +797,12 @@ Usage (action-based API - preferred):
         }
       }
     }
-
-    maybeAutoOpenCrewOverlay(ctx);
-  });
-
-  // ===========================================================================
-  // Crew Autonomous Mode Continuation
-  // ===========================================================================
-
-  pi.on("agent_end", async (_event, ctx) => {
-    // --- Auto-work after plan completion ---
-    const autoWork = consumePendingAutoWork();
-    if (autoWork && !overlayTui) {
-      const cwd = autoWork.cwd;
-      const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
-      const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
-      if (readyTasks.length > 0) {
-        const plan = crewStore.getPlan(cwd);
-        const label = plan ? crewStore.getPlanLabel(plan) : "plan";
-        pi.sendMessage({
-          customType: "crew_auto_work",
-          content: `Plan complete — ${readyTasks.length} task(s) ready for ${label}. Starting autonomous work.\n\nCall: pi_messenger({ action: "work", autonomous: true })`,
-          display: true,
-        }, { triggerTurn: true, deliverAs: "steer" });
-        return;
-      }
-    }
-
-    // --- Existing autonomous continuation ---
-    if (!autonomousState.active) return;
-
-    const cwd = autonomousState.cwd ?? ctx.cwd ?? process.cwd();
-    const crewDir = join(cwd, ".pi", "messenger", "crew");
-    const crewConfig = loadCrewConfig(crewDir);
-
-    // Check max waves limit
-    if (autonomousState.waveNumber >= crewConfig.work.maxWaves) {
-      stopAutonomous("manual");
-      if (ctx.hasUI) {
-        ctx.ui.notify(`Autonomous stopped: max waves (${crewConfig.work.maxWaves}) reached`, "warning");
-      }
-      return;
-    }
-
-    // Check for ready tasks
-    const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
-    
-    if (readyTasks.length === 0) {
-      // No ready tasks - check if all done or blocked
-      const allTasks = crewStore.getTasks(cwd);
-      const allDone = allTasks.every(t => t.status === "done");
-      
-      stopAutonomous(allDone ? "completed" : "blocked");
-      
-      const plan = crewStore.getPlan(cwd);
-      if (ctx.hasUI) {
-        if (allDone) {
-          ctx.ui.notify(`✅ All tasks complete for ${plan?.prd ?? "plan"}!`, "info");
-        } else {
-          const blocked = allTasks.filter(t => t.status === "blocked");
-          ctx.ui.notify(`Autonomous stopped: ${blocked.length} task(s) blocked`, "warning");
-        }
-      }
-      return;
-    }
-
-    // Continue to next wave
-    // Note: waveNumber was already incremented by addWaveResult() in work.ts
-    const plan = crewStore.getPlan(cwd);
-    pi.sendMessage({
-      customType: "crew_continue",
-      content: `Continuing autonomous work on ${plan?.prd ?? "plan"}. Wave ${autonomousState.waveNumber} with ${readyTasks.length} ready task(s).`,
-      display: true
-    }, { triggerTurn: true, deliverAs: "steer" });
-
-    // The steer message will trigger the LLM to call work again
   });
 
   pi.on("session_shutdown", async () => {
-    shutdownLobbyWorkers(process.cwd());
-    shutdownAllWorkers();
     stopStatusHeartbeat();
-    overlayOpening = false;
     overlayHandle = null;
     overlayTui = null;
-    if (isPlanningForCwd(process.cwd()) && planningState.pid === process.pid) {
-      clearPlanningState(process.cwd());
-    }
     if (state.registered) {
       logFeedEvent(process.cwd(), state.agentName, "leave");
     }

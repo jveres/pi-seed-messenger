@@ -31,8 +31,6 @@
   "files": [
     "*.ts",
     "*.mjs",
-    "crew/**",
-    "skills/**",
     "README.md",
     "CHANGELOG.md"
   ],
@@ -44,7 +42,6 @@
     "vitest": "^2.1.8"
   },
   "pi": {
-    "extensions": ["./index.ts"],
-    "skills": ["./skills"]
+    "extensions": ["./index.ts"]
   }
 }
