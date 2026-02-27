@@ -91,6 +91,32 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // Message Delivery
   // ===========================================================================
 
+  // Loop detection: track recent message timestamps per peer to detect rapid back-and-forth
+  const LOOP_WINDOW_MS = 60_000;  // Time window to track exchanges
+  const LOOP_MAX_EXCHANGES = 3;   // Max messages from same peer within window before suppressing turn
+  const recentExchanges = new Map<string, number[]>(); // peer name → timestamps of received messages
+
+  /**
+   * Detect if we're in a rapid echo loop with a peer.
+   * Returns true if we've received >= LOOP_MAX_EXCHANGES messages from
+   * the same agent within LOOP_WINDOW_MS, indicating a back-and-forth loop.
+   */
+  function isEchoLoop(from: string): boolean {
+    const now = Date.now();
+    let timestamps = recentExchanges.get(from);
+    if (!timestamps) {
+      timestamps = [];
+      recentExchanges.set(from, timestamps);
+    }
+
+    // Prune old entries outside the window
+    timestamps = timestamps.filter(t => now - t < LOOP_WINDOW_MS);
+    timestamps.push(now);
+    recentExchanges.set(from, timestamps);
+
+    return timestamps.length >= LOOP_MAX_EXCHANGES;
+  }
+
   function deliverMessage(msg: AgentMailMessage): void {
     // Store in chat history (keyed by sender)
     let history = state.chatHistory.get(msg.from);
@@ -107,6 +133,9 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     // Trigger overlay re-render if open
     overlayTui?.requestRender();
+
+    // Loop detection: suppress triggerTurn if rapid back-and-forth detected
+    const loopDetected = isEchoLoop(msg.from);
 
     // Build message content with optional context
     // Detect if this is a new agent identity (first contact OR same name but different session)
@@ -142,10 +171,20 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       content = `*(reply to ${msg.replyTo.substring(0, 8)})*\n\n${content}`;
     }
 
-    pi.sendMessage(
-      { customType: "agent_message", content, display: true, details: msg },
-      { triggerTurn: true, deliverAs: "steer" }
-    );
+    if (loopDetected) {
+      // Loop detected: deliver message for visibility but do NOT trigger a new turn.
+      // This breaks the echo loop — the agent sees the message but isn't forced to respond.
+      content += `\n\n*(loop suppressed — too many rapid exchanges with ${msg.from}, no reply needed)*`;
+      pi.sendMessage(
+        { customType: "agent_message", content, display: true, details: msg },
+        { triggerTurn: false }
+      );
+    } else {
+      pi.sendMessage(
+        { customType: "agent_message", content, display: true, details: msg },
+        { triggerTurn: true, deliverAs: "steer" }
+      );
+    }
   }
 
   // ===========================================================================
@@ -267,7 +306,13 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       : folder;
     pi.sendMessage({
       customType: "messenger_context",
-      content: `You are agent "${state.agentName}" in ${locationPart}. Use pi_messenger({ action: "status" }) to see who's online.`,
+      content: `You are agent "${state.agentName}" in ${locationPart}. Use pi_messenger({ action: "status" }) to see who's online.
+
+MESSAGING RULES — prevent infinite echo loops:
+- NEVER send acknowledgment-only messages (thanks, you're welcome, got it, sure, no problem, sounds good, etc.)
+- NEVER reply just to be polite — only send a message when you have substantive information, a question, or a deliverable
+- When you receive a message that requires no action, just continue your current work silently
+- If a message only needs acknowledgment, do NOT reply — silence IS the acknowledgment`,
       display: false
     }, { triggerTurn: false });
   }
