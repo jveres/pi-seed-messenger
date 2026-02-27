@@ -149,7 +149,7 @@ export function executeStatus(state: MessengerState, dirs: Dirs, cwd: string = p
     const myRes = state.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
     text += `Reservations: ${myRes.join(", ")}\n`;
   }
-  text += `\nUse pi_messenger({ action: "list" }) for details, pi_messenger({ action: "task.list" }) for tasks.`;
+  text += `\nUse pi_messenger({ action: "list" }) for details, pi_messenger({ action: "feed" }) for activity.`;
 
   return result(text, {
     mode: "status",
